@@ -1,0 +1,98 @@
+---
+title: "Wildfires"
+author: "Eliza"
+execute:
+  echo: false
+---
+
+```{r}
+#| cache: true
+#| message: false
+library(tidyverse)
+library(purrr)
+library(leaflet)
+library(jsonlite)
+
+raw <- fromJSON("data/wildfires.geojson")
+nrow(raw$features)
+
+fire <- raw$features[1, ]
+names(fire)
+fire$geometry$coordinates[[1]][1, 1, ]
+
+fires <- tibble(features = raw$features) |>
+  unnest_wider(features) |>
+  unnest_wider(properties) |>
+  unnest_wider(geometry, names_sep = "_") |>
+  select(incident, gis_acres, fire_year, agency, state, geometry_coordinates) |>
+  mutate(
+    gis_acres = as.numeric(gis_acres),
+    fire_year = as.integer(fire_year)
+  )
+```
+
+```{r}
+big_fires <- fires |>
+  dplyr::filter(gis_acres >= 100000) |>
+  dplyr::mutate(
+    lon = purrr::map_dbl(geometry_coordinates, \(coordinates) mean(coordinates[[1]][, , 1])),
+    lat = purrr::map_dbl(geometry_coordinates, \(coordinates) mean(coordinates[[1]][, , 2]))
+  )
+```
+
+```{r}
+largest_fires <- big_fires |>
+  dplyr::arrange(dplyr::desc(gis_acres)) |>
+  dplyr::slice_head(n = 10) |>
+  dplyr::mutate(
+    boundary = purrr::map(
+      geometry_coordinates,
+      \(coordinates) coordinates[[1]][1, , ]
+    )
+  )
+
+all_lons <- unlist(purrr::map(largest_fires$boundary, \(coordinates) coordinates[, 1]))
+all_lats <- unlist(purrr::map(largest_fires$boundary, \(coordinates) coordinates[, 2]))
+
+fire_map <- leaflet::leaflet() |>
+  leaflet::addTiles() |>
+  leaflet::fitBounds(
+    lng1 = min(all_lons),
+    lat1 = min(all_lats),
+    lng2 = max(all_lons),
+    lat2 = max(all_lats)
+  )
+
+for (i in seq_len(nrow(largest_fires))) {
+  coordinates <- largest_fires$boundary[[i]]
+  fire_map <- leaflet::addPolygons(
+    fire_map,
+    lng = coordinates[, 1],
+    lat = coordinates[, 2],
+    popup = paste0(
+      "Fire: ", largest_fires$incident[i],
+      "<br>Year: ", largest_fires$fire_year[i],
+      "<br>Acres: ", format(round(largest_fires$gis_acres[i]), big.mark = ",")
+    )
+  )
+}
+
+fire_map
+```
+
+```{r}
+fires |>
+  dplyr::filter(!is.na(state)) |>
+  dplyr::group_by(state) |>
+  dplyr::summarise(total_acres = sum(gis_acres, na.rm = TRUE), .groups = "drop") |>
+  dplyr::slice_max(order_by = total_acres, n = 10, with_ties = FALSE) |>
+  ggplot2::ggplot(ggplot2::aes(x = forcats::fct_reorder(state, total_acres), y = total_acres)) +
+  ggplot2::geom_col() +
+  ggplot2::coord_flip() +
+  ggplot2::labs(
+    title = "Top 10 States by Acres Burned",
+    x = "State",
+    y = "Total acres burned",
+    caption = "Source: wildfire records in data/wildfires.geojson"
+  )
+```
